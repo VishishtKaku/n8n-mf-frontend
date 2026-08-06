@@ -172,6 +172,7 @@ SIP_HEADERS = ["Period", "Rs.1000 SIP Start Date", "Invested(Rs)", "Latest(Rs)",
 SIP_END_COL = SIP_START_COL + len(SIP_HEADERS) - 1         # T (20)
 
 
+@st.cache_data(ttl=300, show_spinner="Building Excel export...")
 def build_formatted_workbook(subset_df, title):
     """Block-per-fund layout: title row (merged, bold, light-blue fill),
     LUMP SUM / SIP Return section-label row (styled the same as the title
@@ -184,15 +185,25 @@ def build_formatted_workbook(subset_df, title):
 
     col_max_len = {}
 
-    def set_cell(row, col, value, blank_ok=False):
+    GREEN_FONT = Font(color="1E7B34")
+    RED_FONT = Font(color="C00000")
+
+    def set_cell(row, col, value, blank_ok=False, colorize=False):
         """blank_ok=True for cells where None is a legitimate label placeholder
         (e.g. an unused row entirely) rather than a missing data point -- those
         stay truly empty. Everything else shows '-' instead of blank so it's
-        clear the cell was considered, not skipped."""
+        clear the cell was considered, not skipped. colorize=True paints
+        positive return values green, negative red -- only used on actual
+        Absolute(%)/Annualised(%) return cells, not dates/amounts/labels."""
         display = value if (value is not None or blank_ok) else "-"
         cell = ws.cell(row=row, column=col, value=display)
         cell.alignment = CENTER
         cell.border = THIN_BORDER
+        if colorize and isinstance(display, (int, float)) and not isinstance(display, bool):
+            if display > 0:
+                cell.font = GREEN_FONT
+            elif display < 0:
+                cell.font = RED_FONT
         if display is not None:
             col_max_len[col] = max(col_max_len.get(col, 0), len(str(display)))
         return cell
@@ -243,14 +254,14 @@ def build_formatted_workbook(subset_df, title):
         for ci, p in enumerate(PERIOD_ORDER):
             match = fund_rows[fund_rows["period"] == p]
             val = match["abs_display"].iloc[0] if not match.empty else None
-            set_cell(r, PERIOD_START_COL + ci, None if val is None or pd.isna(val) else round(val * 100, 2))
+            set_cell(r, PERIOD_START_COL + ci, None if val is None or pd.isna(val) else round(val * 100, 2), colorize=True)
         r += 1
 
         set_cell(r, LABEL_COL, "Annualised(%)")
         for ci, p in enumerate(PERIOD_ORDER):
             match = fund_rows[fund_rows["period"] == p]
             val = match["ann_display"].iloc[0] if not match.empty else None
-            set_cell(r, PERIOD_START_COL + ci, None if val is None or pd.isna(val) else round(val * 100, 2))
+            set_cell(r, PERIOD_START_COL + ci, None if val is None or pd.isna(val) else round(val * 100, 2), colorize=True)
         r += 1
 
         set_cell(r, LABEL_COL, "Category Average(%)")
@@ -272,8 +283,8 @@ def build_formatted_workbook(subset_df, title):
             set_cell(row_num, SIP_START_COL + 1, None if pd.isna(start_date) else start_date)
             set_cell(row_num, SIP_START_COL + 2, None if pd.isna(invested) else round(invested, 2))
             set_cell(row_num, SIP_START_COL + 3, None if pd.isna(latest_val) else round(latest_val, 2))
-            set_cell(row_num, SIP_START_COL + 4, None if pd.isna(sip_abs) else round(sip_abs * 100, 2))
-            set_cell(row_num, SIP_START_COL + 5, None if pd.isna(sip_ann) else round(sip_ann * 100, 2))
+            set_cell(row_num, SIP_START_COL + 4, None if pd.isna(sip_abs) else round(sip_abs * 100, 2), colorize=True)
+            set_cell(row_num, SIP_START_COL + 5, None if pd.isna(sip_ann) else round(sip_ann * 100, 2), colorize=True)
 
         for si, sp in enumerate(SIP_PERIODS):
             row_num = data_start_row + si
@@ -308,8 +319,7 @@ def build_formatted_workbook(subset_df, title):
 
     buf = BytesIO()
     wb.save(buf)
-    buf.seek(0)
-    return buf
+    return buf.getvalue()
 
 
 def render_fund_block(fund_rows, scheme_code):
@@ -322,12 +332,13 @@ def render_fund_block(fund_rows, scheme_code):
     st.caption(f"{amc} • {ftype} • {category}")
 
     periods_present = [p for p in PERIOD_ORDER if p in fund_rows["period"].values]
+    by_period = fund_rows.set_index("period")
     abs_row, ann_row = {}, {}
     for p in periods_present:
-        r = fund_rows[fund_rows["period"] == p].iloc[0]
-        abs_row[p] = fmt_pct(r["abs_display"])
-        ann_row[p] = fmt_pct(r["ann_display"])
-    blank_row = {p: "" for p in periods_present}
+        r = by_period.loc[p]
+        abs_row[p] = r["abs_display"]
+        ann_row[p] = r["ann_display"]
+    blank_row = {p: None for p in periods_present}
 
     table = pd.DataFrame(
         [abs_row, ann_row, blank_row, blank_row],
@@ -335,7 +346,16 @@ def render_fund_block(fund_rows, scheme_code):
                "Scheme Benchmark (%) — not available yet"],
     )
     table = table[periods_present]
-    st.table(table)
+
+    def color_returns(val):
+        if pd.isna(val):
+            return ""
+        return "color: #1E7B34; font-weight: 600" if val > 0 else (
+            "color: #C00000; font-weight: 600" if val < 0 else ""
+        )
+
+    styled = table.style.format(lambda v: fmt_pct(v) if pd.notna(v) else "—").applymap(color_returns)
+    st.table(styled)
     st.markdown("")
 
 
@@ -555,7 +575,11 @@ with tab_builder:
 
         st.markdown("### Add or edit a bank's approved funds")
 
-        existing_banks = sorted(load_bank_approvals()["bank_name"].unique().tolist()) if not load_bank_approvals().empty else []
+        _approvals_for_banks = load_bank_approvals()
+        existing_banks = (
+            sorted(_approvals_for_banks["bank_name"].unique().tolist())
+            if not _approvals_for_banks.empty else []
+        )
         bank_choice_mode = st.radio(
             "Bank", ["Choose existing", "Add new"], horizontal=True, key="bank_mode"
         )
