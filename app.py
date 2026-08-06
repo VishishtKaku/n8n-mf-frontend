@@ -136,7 +136,34 @@ def write_bank_approvals(bank_name, scheme_codes):
     return len(rows)
 
 
-def remove_bank(bank_name):
+def add_bank_approvals(bank_name, scheme_codes):
+    """Approves the given funds for a bank -- additive only, never touches
+    any other existing approval for this bank."""
+    if not scheme_codes:
+        return 0
+    supabase = get_client()
+    now = datetime.now(timezone.utc).isoformat()
+    rows = [
+        {"bank_name": bank_name, "scheme_code": int(c), "approved": True, "updated_at": now}
+        for c in scheme_codes
+    ]
+    supabase.table("bank_fund_approvals").upsert(rows, on_conflict="bank_name,scheme_code").execute()
+    return len(rows)
+
+
+def remove_selected_bank_approvals(bank_name, scheme_codes):
+    """Unapproves only the specific funds given -- every other approval for
+    this bank is left untouched."""
+    if not scheme_codes:
+        return 0
+    supabase = get_client()
+    now = datetime.now(timezone.utc).isoformat()
+    rows = [
+        {"bank_name": bank_name, "scheme_code": int(c), "approved": False, "updated_at": now}
+        for c in scheme_codes
+    ]
+    supabase.table("bank_fund_approvals").upsert(rows, on_conflict="bank_name,scheme_code").execute()
+    return len(rows)
     """Unapprove every fund for this bank (approved=false for all its rows,
     same pattern as write_bank_approvals -- never hard-deletes, keeps history)."""
     supabase = get_client()
@@ -638,52 +665,65 @@ with tab_builder:
 
             all_fund_options = funds_only_df.dropna(subset=["fund_name"]).sort_values("fund_name")
             fund_label_to_code = dict(zip(all_fund_options["fund_name"], all_fund_options["scheme_code"]))
+            code_to_label = {c: n for n, c in fund_label_to_code.items()}
 
             current_approvals_df = load_bank_approvals()
-            default_codes = []
+            approved_codes = set()
             if bank_name and not current_approvals_df.empty:
-                default_codes = current_approvals_df[
-                    current_approvals_df["bank_name"] == bank_name
-                ]["scheme_code"].tolist()
-            default_labels = [
-                name for name, code in fund_label_to_code.items() if code in default_codes
-            ]
+                approved_codes = set(
+                    current_approvals_df[current_approvals_df["bank_name"] == bank_name]["scheme_code"]
+                )
+            approved_labels = sorted(code_to_label[c] for c in approved_codes if c in code_to_label)
 
-            # Chips truncate long fund names, making it hard to see what's actually
-            # selected — narrow the picker with a search box, and always keep
-            # already-selected funds in the option list even if search filters them out.
+            st.markdown("#### Add funds")
             search_term = st.text_input(
-                "Search to narrow the fund list", key="fund_search_builder",
+                "Search funds to add", key="fund_search_add",
                 placeholder="e.g. Balanced Advantage, Focused Fund...",
             )
+            # options exclude funds already approved for this bank -- nothing to
+            # "add" that's already on the list, keeps this search list shorter
+            addable_pool = [n for n in fund_label_to_code if fund_label_to_code[n] not in approved_codes]
             if search_term:
-                pool_labels = [n for n in fund_label_to_code if search_term.lower() in n.lower()]
-            else:
-                pool_labels = list(fund_label_to_code.keys())
-            option_labels = sorted(set(pool_labels) | set(default_labels))
-
-            selected_labels = st.multiselect(
-                "Approved funds for this bank (unchecking removes approval)",
-                options=option_labels,
-                default=default_labels,
-                key="fund_multiselect",
+                addable_pool = [n for n in addable_pool if search_term.lower() in n.lower()]
+            to_add_labels = st.multiselect(
+                "Select funds to add", options=sorted(addable_pool), default=[], key="fund_add_multiselect"
             )
-
-            st.caption(f"**{len(selected_labels)} funds selected**")
-            if selected_labels:
-                st.dataframe(
-                    pd.DataFrame({"Selected fund": sorted(selected_labels)}),
-                    use_container_width=True, hide_index=True, height=min(300, 40 + 35 * len(selected_labels)),
-                )
-
-            if st.button("Save to Supabase", key="save_approvals_btn"):
+            if st.button("Add selected funds", key="add_funds_btn"):
                 if not bank_name:
                     st.error("Enter a bank name first.")
+                elif not to_add_labels:
+                    st.error("Select at least one fund to add.")
                 else:
-                    selected_codes = [fund_label_to_code[lbl] for lbl in selected_labels]
-                    n = write_bank_approvals(bank_name, selected_codes)
+                    codes = [fund_label_to_code[lbl] for lbl in to_add_labels]
+                    n = add_bank_approvals(bank_name, codes)
                     st.cache_data.clear()
-                    st.success(f"Saved {len(selected_codes)} approved funds for {bank_name}.")
+                    st.success(f"Added {n} fund(s) to {bank_name}'s approval list.")
+                    st.rerun()
+
+            st.markdown("#### Currently approved funds")
+            if not approved_labels:
+                st.caption("No funds approved for this bank yet.")
+            else:
+                st.dataframe(
+                    pd.DataFrame({"Approved fund": approved_labels}),
+                    use_container_width=True, hide_index=True,
+                    height=min(300, 40 + 35 * len(approved_labels)),
+                )
+
+                st.markdown("#### Remove funds")
+                to_remove_labels = st.multiselect(
+                    "Select approved funds to disapprove", options=approved_labels, default=[],
+                    key="fund_remove_multiselect",
+                )
+                if st.button("Remove selected funds", key="remove_funds_btn", type="primary"):
+                    if not to_remove_labels:
+                        st.error("Select at least one fund to remove.")
+                    else:
+                        codes = [fund_label_to_code[lbl] for lbl in to_remove_labels]
+                        n = remove_selected_bank_approvals(bank_name, codes)
+                        st.cache_data.clear()
+                        st.success(f"Removed {n} fund(s) from {bank_name}'s approval list.")
+                        st.rerun()
 
         st.divider()
         st.markdown("### Current approvals (all banks)")
