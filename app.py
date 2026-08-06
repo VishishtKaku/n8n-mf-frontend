@@ -354,7 +354,7 @@ def render_fund_block(fund_rows, scheme_code):
             "color: #C00000; font-weight: 600" if val < 0 else ""
         )
 
-    styled = table.style.format(lambda v: fmt_pct(v) if pd.notna(v) else "—").applymap(color_returns)
+    styled = table.style.format(lambda v: fmt_pct(v) if pd.notna(v) else "—").map(color_returns)
     st.table(styled)
     st.markdown("")
 
