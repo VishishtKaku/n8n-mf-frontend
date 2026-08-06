@@ -595,7 +595,7 @@ with tab_builder:
                 st.session_state.is_admin = False
                 st.rerun()
 
-        st.markdown("### Add or edit a bank's approved funds")
+        st.markdown("### Manage Bank Approved Funds")
 
         _approvals_for_banks = load_bank_approvals()
         existing_banks = (
@@ -603,86 +603,87 @@ with tab_builder:
             if not _approvals_for_banks.empty else []
         )
         bank_choice_mode = st.radio(
-            "Bank", ["Choose existing", "Add new"], horizontal=True, key="bank_mode"
-        )
-        if bank_choice_mode == "Choose existing" and existing_banks:
-            bank_name = st.selectbox("Existing bank", existing_banks, key="bank_existing")
-        else:
-            bank_name = st.text_input("New bank name", key="bank_new")
-
-        all_fund_options = funds_only_df.dropna(subset=["fund_name"]).sort_values("fund_name")
-        fund_label_to_code = dict(zip(all_fund_options["fund_name"], all_fund_options["scheme_code"]))
-
-        current_approvals_df = load_bank_approvals()
-        default_codes = []
-        if bank_name and not current_approvals_df.empty:
-            default_codes = current_approvals_df[
-                current_approvals_df["bank_name"] == bank_name
-            ]["scheme_code"].tolist()
-        default_labels = [
-            name for name, code in fund_label_to_code.items() if code in default_codes
-        ]
-
-        # Chips truncate long fund names, making it hard to see what's actually
-        # selected — narrow the picker with a search box, and always keep
-        # already-selected funds in the option list even if search filters them out.
-        search_term = st.text_input(
-            "Search to narrow the fund list", key="fund_search_builder",
-            placeholder="e.g. Balanced Advantage, Focused Fund...",
-        )
-        if search_term:
-            pool_labels = [n for n in fund_label_to_code if search_term.lower() in n.lower()]
-        else:
-            pool_labels = list(fund_label_to_code.keys())
-        option_labels = sorted(set(pool_labels) | set(default_labels))
-
-        selected_labels = st.multiselect(
-            "Approved funds for this bank (unchecking removes approval)",
-            options=option_labels,
-            default=default_labels,
-            key="fund_multiselect",
+            "Bank", ["Choose existing", "Add new", "Remove bank"], horizontal=True, key="bank_mode"
         )
 
-        st.caption(f"**{len(selected_labels)} funds selected**")
-        if selected_labels:
-            st.dataframe(
-                pd.DataFrame({"Selected fund": sorted(selected_labels)}),
-                use_container_width=True, hide_index=True, height=min(300, 40 + 35 * len(selected_labels)),
-            )
-
-        if st.button("Save to Supabase", key="save_approvals_btn"):
-            if not bank_name:
-                st.error("Enter a bank name first.")
+        if bank_choice_mode == "Remove bank":
+            if not existing_banks:
+                st.caption("No banks to remove yet.")
             else:
-                selected_codes = [fund_label_to_code[lbl] for lbl in selected_labels]
-                n = write_bank_approvals(bank_name, selected_codes)
-                st.cache_data.clear()
-                st.success(f"Saved {len(selected_codes)} approved funds for {bank_name}.")
+                remove_bank_choice = st.selectbox(
+                    "Bank to remove", existing_banks, key="bank_remove_select"
+                )
+                st.caption(
+                    f"This unapproves all funds currently listed under **{remove_bank_choice}** "
+                    "— the bank disappears from Bank Approved Funds and Fund Builder dropdowns. "
+                    "Type the bank name below to confirm."
+                )
+                confirm_text = st.text_input(
+                    "Type the bank name to confirm removal", key="bank_remove_confirm"
+                )
+                if st.button("Remove bank", key="remove_bank_btn", type="primary"):
+                    if confirm_text != remove_bank_choice:
+                        st.error("Typed name doesn't match. Nothing removed.")
+                    else:
+                        n = remove_bank(remove_bank_choice)
+                        st.cache_data.clear()
+                        st.success(f"Removed {remove_bank_choice} — {n} fund approvals cleared.")
+                        st.rerun()
 
-        st.divider()
-        st.markdown("### Remove a bank")
-        if not existing_banks:
-            st.caption("No banks to remove yet.")
         else:
-            remove_bank_choice = st.selectbox(
-                "Bank to remove", existing_banks, key="bank_remove_select"
+            if bank_choice_mode == "Choose existing" and existing_banks:
+                bank_name = st.selectbox("Existing bank", existing_banks, key="bank_existing")
+            else:
+                bank_name = st.text_input("New bank name", key="bank_new")
+
+            all_fund_options = funds_only_df.dropna(subset=["fund_name"]).sort_values("fund_name")
+            fund_label_to_code = dict(zip(all_fund_options["fund_name"], all_fund_options["scheme_code"]))
+
+            current_approvals_df = load_bank_approvals()
+            default_codes = []
+            if bank_name and not current_approvals_df.empty:
+                default_codes = current_approvals_df[
+                    current_approvals_df["bank_name"] == bank_name
+                ]["scheme_code"].tolist()
+            default_labels = [
+                name for name, code in fund_label_to_code.items() if code in default_codes
+            ]
+
+            # Chips truncate long fund names, making it hard to see what's actually
+            # selected — narrow the picker with a search box, and always keep
+            # already-selected funds in the option list even if search filters them out.
+            search_term = st.text_input(
+                "Search to narrow the fund list", key="fund_search_builder",
+                placeholder="e.g. Balanced Advantage, Focused Fund...",
             )
-            st.caption(
-                f"This unapproves all funds currently listed under **{remove_bank_choice}** "
-                "— the bank disappears from Bank Approved Funds and Fund Builder dropdowns. "
-                "Type the bank name below to confirm."
+            if search_term:
+                pool_labels = [n for n in fund_label_to_code if search_term.lower() in n.lower()]
+            else:
+                pool_labels = list(fund_label_to_code.keys())
+            option_labels = sorted(set(pool_labels) | set(default_labels))
+
+            selected_labels = st.multiselect(
+                "Approved funds for this bank (unchecking removes approval)",
+                options=option_labels,
+                default=default_labels,
+                key="fund_multiselect",
             )
-            confirm_text = st.text_input(
-                "Type the bank name to confirm removal", key="bank_remove_confirm"
-            )
-            if st.button("Remove bank", key="remove_bank_btn", type="primary"):
-                if confirm_text != remove_bank_choice:
-                    st.error("Typed name doesn't match. Nothing removed.")
+
+            st.caption(f"**{len(selected_labels)} funds selected**")
+            if selected_labels:
+                st.dataframe(
+                    pd.DataFrame({"Selected fund": sorted(selected_labels)}),
+                    use_container_width=True, hide_index=True, height=min(300, 40 + 35 * len(selected_labels)),
+                )
+
+            if st.button("Save to Supabase", key="save_approvals_btn"):
+                if not bank_name:
+                    st.error("Enter a bank name first.")
                 else:
-                    n = remove_bank(remove_bank_choice)
+                    selected_codes = [fund_label_to_code[lbl] for lbl in selected_labels]
+                    n = write_bank_approvals(bank_name, selected_codes)
                     st.cache_data.clear()
-                    st.success(f"Removed {remove_bank_choice} — {n} fund approvals cleared.")
-                    st.rerun()
+                    st.success(f"Saved {len(selected_codes)} approved funds for {bank_name}.")
 
         st.divider()
         st.markdown("### Current approvals (all banks)")
