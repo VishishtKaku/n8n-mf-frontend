@@ -136,6 +136,28 @@ def write_bank_approvals(bank_name, scheme_codes):
     return len(rows)
 
 
+def remove_bank(bank_name):
+    """Unapprove every fund for this bank (approved=false for all its rows,
+    same pattern as write_bank_approvals -- never hard-deletes, keeps history)."""
+    supabase = get_client()
+    now = datetime.now(timezone.utc).isoformat()
+    existing = (
+        supabase.table("bank_fund_approvals")
+        .select("scheme_code")
+        .eq("bank_name", bank_name)
+        .execute()
+    )
+    codes = [r["scheme_code"] for r in existing.data]
+    if not codes:
+        return 0
+    rows = [
+        {"bank_name": bank_name, "scheme_code": int(c), "approved": False, "updated_at": now}
+        for c in codes
+    ]
+    supabase.table("bank_fund_approvals").upsert(rows, on_conflict="bank_name,scheme_code").execute()
+    return len(rows)
+
+
 def fmt_pct(x):
     if pd.isna(x):
         return ""
@@ -636,6 +658,31 @@ with tab_builder:
                 n = write_bank_approvals(bank_name, selected_codes)
                 st.cache_data.clear()
                 st.success(f"Saved {len(selected_codes)} approved funds for {bank_name}.")
+
+        st.divider()
+        st.markdown("### Remove a bank")
+        if not existing_banks:
+            st.caption("No banks to remove yet.")
+        else:
+            remove_bank_choice = st.selectbox(
+                "Bank to remove", existing_banks, key="bank_remove_select"
+            )
+            st.caption(
+                f"This unapproves all funds currently listed under **{remove_bank_choice}** "
+                "— the bank disappears from Bank Approved Funds and Fund Builder dropdowns. "
+                "Type the bank name below to confirm."
+            )
+            confirm_text = st.text_input(
+                "Type the bank name to confirm removal", key="bank_remove_confirm"
+            )
+            if st.button("Remove bank", key="remove_bank_btn", type="primary"):
+                if confirm_text != remove_bank_choice:
+                    st.error("Typed name doesn't match. Nothing removed.")
+                else:
+                    n = remove_bank(remove_bank_choice)
+                    st.cache_data.clear()
+                    st.success(f"Removed {remove_bank_choice} — {n} fund approvals cleared.")
+                    st.rerun()
 
         st.divider()
         st.markdown("### Current approvals (all banks)")
