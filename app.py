@@ -23,8 +23,8 @@ BANK_LOGO_DIR = "assets/bank_logos"
 # SEBI-mandated mutual fund disclaimer -- edit the wording here if your
 # compliance team wants different phrasing. Repeats on every printed page.
 MF_DISCLAIMER_TEXT = (
-    "Mutual Fund investments are subject to market risks, read all scheme "
-    "related documents carefully. Past performance is not indicative of future returns."
+    "Disclaimer: Mutual Fund investments are subject to market risks, read all "
+    "scheme related documents carefully. Past performance is not indicative of future returns."
 )
 
 
@@ -430,16 +430,20 @@ def build_formatted_workbook(subset_df, title, bank_name=None):
     ws.column_dimensions[get_column_letter(GAP_COL)].width = 3
 
     # Print setup for hardcopy: logo+title rows repeat at the top of every
-    # printed page (Excel's print titles), whole table scaled to fit page
-    # width, mutual fund disclaimer in the footer -- footers repeat on every
-    # printed page automatically, regardless of how many pages the export spans.
+    # printed page (Excel's print titles), mutual fund disclaimer in the
+    # footer -- footers repeat on every printed page automatically, regardless
+    # of how many pages the export spans. Printing at natural 100% scale
+    # (not forced to fit one page width) -- this table is 20 columns wide,
+    # forcing it onto a single page shrinks everything to unreadable size;
+    # spilling across 2 pages wide at full size is far more legible.
     ws.print_title_rows = f"{LOGO_ROW}:{TITLE_ROW}"
     ws.page_setup.orientation = "landscape"
-    ws.page_setup.fitToWidth = 1
-    ws.page_setup.fitToHeight = 0
-    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_setup.fitToPage = False
+    ws.page_setup.scale = 100
+    ws.sheet_properties.pageSetUpPr.fitToPage = False
+    ws.HeaderFooter.scaleWithDoc = False  # keep footer text size fixed, independent of body scale
     ws.oddFooter.center.text = MF_DISCLAIMER_TEXT
-    ws.oddFooter.center.size = 8
+    ws.oddFooter.center.size = 10
 
     buf = BytesIO()
     wb.save(buf)
