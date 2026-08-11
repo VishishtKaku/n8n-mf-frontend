@@ -764,15 +764,10 @@ with tab_builder:
                 addable_df["plan_type"].isin(plan_choice) & addable_df["option_type"].isin(option_choice)
             ]
 
-            search_term = st.text_input(
-                "Search funds to add", key="fund_search_add",
-                placeholder="e.g. Balanced Advantage, Focused Fund...",
-            )
-            addable_pool = addable_df["fund_name"].tolist()
-            if search_term:
-                addable_pool = [n for n in addable_pool if search_term.lower() in n.lower()]
             to_add_labels = st.multiselect(
-                "Select funds to add", options=sorted(addable_pool), default=[], key="fund_add_multiselect"
+                "Select funds to add", options=sorted(addable_df["fund_name"].tolist()),
+                default=[], key="fund_add_multiselect",
+                help="Type to search within this list -- narrowed by Plan Type/Option above.",
             )
             if st.button("Add selected funds", key="add_funds_btn"):
                 if not bank_name:
