@@ -41,6 +41,18 @@ def sbi_logo_path():
     return SBI_MF_LOGO_PATH if os.path.exists(SBI_MF_LOGO_PATH) else None
 
 
+def multiselect_with_all(container, label, options, default_all=True, key=None, help=None):
+    """Multiselect that allows any combination of options (unlike a selectbox,
+    which forces exactly one choice at a time) plus an 'All' entry -- picking
+    All, or picking nothing, both mean 'no filter, show everything'."""
+    selected = container.multiselect(
+        label, ["All"] + list(options), default=["All"] if default_all else [], key=key, help=help
+    )
+    if not selected or "All" in selected:
+        return list(options)
+    return selected
+
+
 @st.cache_resource
 def get_client():
     url = st.secrets["SUPABASE_URL"]
@@ -516,20 +528,17 @@ tab_all, tab_bank, tab_builder = st.tabs(
 with tab_all:
     st.sidebar.header("Filters — All Funds")
     amc_options = sorted(data["amc_name"].dropna().unique().tolist())
-    selected_amc = st.sidebar.multiselect("AMC", amc_options, default=amc_options, key="amc_all")
+    selected_amc = multiselect_with_all(st.sidebar, "AMC", amc_options, key="amc_all")
 
     fund_type_options = sorted(data["fund_type"].dropna().unique().tolist())
-    selected_fund_type = st.sidebar.multiselect(
-        "Fund Type", fund_type_options, default=fund_type_options, key="ftype_all"
-    )
-    plan_type_options = ["All", "Regular", "Direct", "Other/Unknown"]
-    selected_plan_type = st.sidebar.selectbox(
-        "Plan Type", plan_type_options, key="plan_all",
+    selected_fund_type = multiselect_with_all(st.sidebar, "Fund Type", fund_type_options, key="ftype_all")
+
+    selected_plan_type = multiselect_with_all(
+        st.sidebar, "Plan Type", ["Regular", "Direct", "Other/Unknown"], key="plan_all",
         help="Detected from the fund name text (AMFI doesn't expose this as a separate field)."
     )
-    option_type_options = ["All", "Growth", "IDCW", "Other/Unknown"]
-    selected_option_type = st.sidebar.selectbox(
-        "Option", option_type_options, key="option_all",
+    selected_option_type = multiselect_with_all(
+        st.sidebar, "Option", ["Growth", "IDCW", "Other/Unknown"], key="option_all",
         help="Detected from the fund name text. 'IDCW' includes older 'Dividend'-named schemes."
     )
     fund_name_search = st.sidebar.text_input("Search fund name", key="search_all")
@@ -541,11 +550,9 @@ with tab_all:
     filtered = data[
         data["amc_name"].isin(selected_amc)
         & data["fund_type"].isin(selected_fund_type)
+        & data["plan_type"].isin(selected_plan_type)
+        & data["option_type"].isin(selected_option_type)
     ]
-    if selected_plan_type != "All":
-        filtered = filtered[filtered["plan_type"] == selected_plan_type]
-    if selected_option_type != "All":
-        filtered = filtered[filtered["option_type"] == selected_option_type]
     if fund_name_search:
         filtered = filtered[filtered["fund_name"].str.contains(fund_name_search, case=False, na=False)]
 
@@ -604,21 +611,18 @@ with tab_bank:
         approved_codes = approvals[approvals["bank_name"] == selected_bank]["scheme_code"].tolist()
         bank_data_all_plans = data[data["scheme_code"].isin(approved_codes)]
 
-        plan_type_options_bank = ["All", "Regular", "Direct", "Other/Unknown"]
-        selected_plan_type_bank = st.selectbox(
-            "Plan Type", plan_type_options_bank, key="plan_bank",
+        selected_plan_type_bank = multiselect_with_all(
+            st, "Plan Type", ["Regular", "Direct", "Other/Unknown"], key="plan_bank",
             help="Detected from the fund name text (AMFI doesn't expose this as a separate field)."
         )
-        option_type_options_bank = ["All", "Growth", "IDCW", "Other/Unknown"]
-        selected_option_type_bank = st.selectbox(
-            "Option", option_type_options_bank, key="option_bank",
+        selected_option_type_bank = multiselect_with_all(
+            st, "Option", ["Growth", "IDCW", "Other/Unknown"], key="option_bank",
             help="Detected from the fund name text. 'IDCW' includes older 'Dividend'-named schemes."
         )
-        bank_data = bank_data_all_plans
-        if selected_plan_type_bank != "All":
-            bank_data = bank_data[bank_data["plan_type"] == selected_plan_type_bank]
-        if selected_option_type_bank != "All":
-            bank_data = bank_data[bank_data["option_type"] == selected_option_type_bank]
+        bank_data = bank_data_all_plans[
+            bank_data_all_plans["plan_type"].isin(selected_plan_type_bank)
+            & bank_data_all_plans["option_type"].isin(selected_option_type_bank)
+        ]
 
         matching_codes = bank_data["scheme_code"].unique().tolist()
         st.subheader(f"{selected_bank} — {len(matching_codes)} approved funds")
@@ -748,18 +752,17 @@ with tab_builder:
 
             fc1, fc2 = st.columns(2)
             with fc1:
-                plan_choice = st.selectbox(
-                    "Plan Type", ["All", "Regular", "Direct", "Other/Unknown"], key="plan_add",
+                plan_choice = multiselect_with_all(
+                    st, "Plan Type", ["Regular", "Direct", "Other/Unknown"], key="plan_add",
                     help="Choose Growth/Direct/etc first, then narrow further by typing the fund name below.",
                 )
             with fc2:
-                option_choice = st.selectbox(
-                    "Option", ["All", "Growth", "IDCW", "Other/Unknown"], key="option_add",
+                option_choice = multiselect_with_all(
+                    st, "Option", ["Growth", "IDCW", "Other/Unknown"], key="option_add",
                 )
-            if plan_choice != "All":
-                addable_df = addable_df[addable_df["plan_type"] == plan_choice]
-            if option_choice != "All":
-                addable_df = addable_df[addable_df["option_type"] == option_choice]
+            addable_df = addable_df[
+                addable_df["plan_type"].isin(plan_choice) & addable_df["option_type"].isin(option_choice)
+            ]
 
             search_term = st.text_input(
                 "Search funds to add", key="fund_search_add",
