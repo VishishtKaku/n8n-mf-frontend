@@ -1,14 +1,44 @@
 import streamlit as st
 import pandas as pd
+import os
+import re
 from io import BytesIO
 from datetime import datetime, timezone
 from supabase import create_client
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.drawing.image import Image as XLImage
 
 st.set_page_config(page_title="SBI Fund Returns Dashboard", layout="wide")
 
 PERIOD_ORDER = ["1W", "1M", "3M", "6M", "YTD", "1Y", "2Y", "3Y", "5Y", "10Y", "SI"]
+
+# Print assets: SBI MF logo is constant, add the file yourself at this path in
+# the repo. Bank logos are looked up by a slug of the bank name -- e.g. "AU
+# Small Finance Bank" -> assets/bank_logos/au_small_finance_bank.png. Missing
+# files are skipped silently (no crash), that side of the header is just blank.
+SBI_MF_LOGO_PATH = "assets/sbi_mf_logo.png"
+BANK_LOGO_DIR = "assets/bank_logos"
+
+# SEBI-mandated mutual fund disclaimer -- edit the wording here if your
+# compliance team wants different phrasing. Repeats on every printed page.
+MF_DISCLAIMER_TEXT = (
+    "Mutual Fund investments are subject to market risks, read all scheme "
+    "related documents carefully. Past performance is not indicative of future returns."
+)
+
+
+def slugify_bank_name(name):
+    return re.sub(r"[^a-z0-9]+", "_", (name or "").lower()).strip("_")
+
+
+def bank_logo_path(bank_name):
+    path = os.path.join(BANK_LOGO_DIR, f"{slugify_bank_name(bank_name)}.png")
+    return path if os.path.exists(path) else None
+
+
+def sbi_logo_path():
+    return SBI_MF_LOGO_PATH if os.path.exists(SBI_MF_LOGO_PATH) else None
 
 
 @st.cache_resource
@@ -222,12 +252,15 @@ SIP_END_COL = SIP_START_COL + len(SIP_HEADERS) - 1         # T (20)
 
 
 @st.cache_data(ttl=300, show_spinner="Building Excel export...")
-def build_formatted_workbook(subset_df, title):
-    """Block-per-fund layout: title row (merged, bold, light-blue fill),
-    LUMP SUM / SIP Return section-label row (styled the same as the title
-    row), fund name row, then a bordered grid — lump-sum periods in fixed
-    columns C..M (so 10Y/SI always land inside the table), a blank gap
-    column N, then the SIP grid in O..T. Column widths autofit to content."""
+def build_formatted_workbook(subset_df, title, bank_name=None):
+    """Block-per-fund layout: logo row (SBI MF logo left, bank logo right --
+    repeats on every printed page via print_title_rows), title row (merged,
+    bold, light-blue fill), LUMP SUM / SIP Return section-label row (styled
+    the same as the title row), fund name row, then a bordered grid —
+    lump-sum periods in fixed columns C..M (so 10Y/SI always land inside the
+    table), a blank gap column N, then the SIP grid in O..T. Column widths
+    autofit to content. Page setup targets hardcopy printing: landscape,
+    fit-to-width, mutual fund disclaimer in the footer on every page."""
     wb = Workbook()
     ws = wb.active
     ws.title = "Approved Funds"[:31]
@@ -257,14 +290,32 @@ def build_formatted_workbook(subset_df, title):
             col_max_len[col] = max(col_max_len.get(col, 0), len(str(display)))
         return cell
 
-    ws.merge_cells(start_row=1, start_column=LABEL_COL, end_row=1, end_column=SIP_END_COL)
-    title_cell = ws.cell(row=1, column=LABEL_COL, value=title)
+    LOGO_ROW = 1
+    TITLE_ROW = 2
+    ws.row_dimensions[LOGO_ROW].height = 46
+
+    sbi_logo = sbi_logo_path()
+    if sbi_logo:
+        img = XLImage(sbi_logo)
+        img.width, img.height = 140, 40
+        img.anchor = f"{get_column_letter(LABEL_COL)}{LOGO_ROW}"
+        ws.add_image(img)
+
+    logo_path = bank_logo_path(bank_name) if bank_name else None
+    if logo_path:
+        img2 = XLImage(logo_path)
+        img2.width, img2.height = 140, 40
+        img2.anchor = f"{get_column_letter(SIP_END_COL - 2)}{LOGO_ROW}"
+        ws.add_image(img2)
+
+    ws.merge_cells(start_row=TITLE_ROW, start_column=LABEL_COL, end_row=TITLE_ROW, end_column=SIP_END_COL)
+    title_cell = ws.cell(row=TITLE_ROW, column=LABEL_COL, value=title)
     title_cell.font = TITLE_FONT
     title_cell.fill = TITLE_FILL
     title_cell.alignment = CENTER
     col_max_len[LABEL_COL] = max(col_max_len.get(LABEL_COL, 0), 20)
 
-    r = 3
+    r = TITLE_ROW + 2  # blank spacer row before the first fund block
     scheme_codes = subset_df["scheme_code"].unique().tolist()
     for scheme_code in scheme_codes:
         fund_rows = subset_df[subset_df["scheme_code"] == scheme_code]
@@ -366,6 +417,18 @@ def build_formatted_workbook(subset_df, title):
         ws.column_dimensions[get_column_letter(col)].width = max(9, min(30, length + 3))
     ws.column_dimensions[get_column_letter(GAP_COL)].width = 3
 
+    # Print setup for hardcopy: logo+title rows repeat at the top of every
+    # printed page (Excel's print titles), whole table scaled to fit page
+    # width, mutual fund disclaimer in the footer -- footers repeat on every
+    # printed page automatically, regardless of how many pages the export spans.
+    ws.print_title_rows = f"{LOGO_ROW}:{TITLE_ROW}"
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.oddFooter.center.text = MF_DISCLAIMER_TEXT
+    ws.oddFooter.center.size = 8
+
     buf = BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -459,14 +522,14 @@ with tab_all:
     selected_fund_type = st.sidebar.multiselect(
         "Fund Type", fund_type_options, default=fund_type_options, key="ftype_all"
     )
-    plan_type_options = ["Regular", "Direct", "Other/Unknown"]
-    selected_plan_type = st.sidebar.multiselect(
-        "Plan Type", plan_type_options, default=["Regular", "Direct"], key="plan_all",
+    plan_type_options = ["All", "Regular", "Direct", "Other/Unknown"]
+    selected_plan_type = st.sidebar.selectbox(
+        "Plan Type", plan_type_options, key="plan_all",
         help="Detected from the fund name text (AMFI doesn't expose this as a separate field)."
     )
-    option_type_options = ["Growth", "IDCW", "Other/Unknown"]
-    selected_option_type = st.sidebar.multiselect(
-        "Option", option_type_options, default=["Growth"], key="option_all",
+    option_type_options = ["All", "Growth", "IDCW", "Other/Unknown"]
+    selected_option_type = st.sidebar.selectbox(
+        "Option", option_type_options, key="option_all",
         help="Detected from the fund name text. 'IDCW' includes older 'Dividend'-named schemes."
     )
     fund_name_search = st.sidebar.text_input("Search fund name", key="search_all")
@@ -478,9 +541,11 @@ with tab_all:
     filtered = data[
         data["amc_name"].isin(selected_amc)
         & data["fund_type"].isin(selected_fund_type)
-        & data["plan_type"].isin(selected_plan_type)
-        & data["option_type"].isin(selected_option_type)
     ]
+    if selected_plan_type != "All":
+        filtered = filtered[filtered["plan_type"] == selected_plan_type]
+    if selected_option_type != "All":
+        filtered = filtered[filtered["option_type"] == selected_option_type]
     if fund_name_search:
         filtered = filtered[filtered["fund_name"].str.contains(fund_name_search, case=False, na=False)]
 
@@ -539,20 +604,21 @@ with tab_bank:
         approved_codes = approvals[approvals["bank_name"] == selected_bank]["scheme_code"].tolist()
         bank_data_all_plans = data[data["scheme_code"].isin(approved_codes)]
 
-        plan_type_options_bank = ["Regular", "Direct", "Other/Unknown"]
-        selected_plan_type_bank = st.multiselect(
-            "Plan Type", plan_type_options_bank, default=["Regular", "Direct"], key="plan_bank",
+        plan_type_options_bank = ["All", "Regular", "Direct", "Other/Unknown"]
+        selected_plan_type_bank = st.selectbox(
+            "Plan Type", plan_type_options_bank, key="plan_bank",
             help="Detected from the fund name text (AMFI doesn't expose this as a separate field)."
         )
-        option_type_options_bank = ["Growth", "IDCW", "Other/Unknown"]
-        selected_option_type_bank = st.multiselect(
-            "Option", option_type_options_bank, default=["Growth"], key="option_bank",
+        option_type_options_bank = ["All", "Growth", "IDCW", "Other/Unknown"]
+        selected_option_type_bank = st.selectbox(
+            "Option", option_type_options_bank, key="option_bank",
             help="Detected from the fund name text. 'IDCW' includes older 'Dividend'-named schemes."
         )
-        bank_data = bank_data_all_plans[
-            bank_data_all_plans["plan_type"].isin(selected_plan_type_bank)
-            & bank_data_all_plans["option_type"].isin(selected_option_type_bank)
-        ]
+        bank_data = bank_data_all_plans
+        if selected_plan_type_bank != "All":
+            bank_data = bank_data[bank_data["plan_type"] == selected_plan_type_bank]
+        if selected_option_type_bank != "All":
+            bank_data = bank_data[bank_data["option_type"] == selected_option_type_bank]
 
         matching_codes = bank_data["scheme_code"].unique().tolist()
         st.subheader(f"{selected_bank} — {len(matching_codes)} approved funds")
@@ -576,7 +642,9 @@ with tab_bank:
                 key="dl_bank",
             )
         with dlb2:
-            xlsx_buf_bank = build_formatted_workbook(bank_data, f"{selected_bank} Approved SBI MUTUAL FUNDS")
+            xlsx_buf_bank = build_formatted_workbook(
+                bank_data, f"{selected_bank} Approved SBI MUTUAL FUNDS", bank_name=selected_bank
+            )
             st.download_button(
                 label="Download Excel (formatted)",
                 data=xlsx_buf_bank,
@@ -676,13 +744,28 @@ with tab_builder:
             approved_labels = sorted(code_to_label[c] for c in approved_codes if c in code_to_label)
 
             st.markdown("#### Add funds")
+            addable_df = all_fund_options[~all_fund_options["scheme_code"].isin(approved_codes)]
+
+            fc1, fc2 = st.columns(2)
+            with fc1:
+                plan_choice = st.selectbox(
+                    "Plan Type", ["All", "Regular", "Direct", "Other/Unknown"], key="plan_add",
+                    help="Choose Growth/Direct/etc first, then narrow further by typing the fund name below.",
+                )
+            with fc2:
+                option_choice = st.selectbox(
+                    "Option", ["All", "Growth", "IDCW", "Other/Unknown"], key="option_add",
+                )
+            if plan_choice != "All":
+                addable_df = addable_df[addable_df["plan_type"] == plan_choice]
+            if option_choice != "All":
+                addable_df = addable_df[addable_df["option_type"] == option_choice]
+
             search_term = st.text_input(
                 "Search funds to add", key="fund_search_add",
                 placeholder="e.g. Balanced Advantage, Focused Fund...",
             )
-            # options exclude funds already approved for this bank -- nothing to
-            # "add" that's already on the list, keeps this search list shorter
-            addable_pool = [n for n in fund_label_to_code if fund_label_to_code[n] not in approved_codes]
+            addable_pool = addable_df["fund_name"].tolist()
             if search_term:
                 addable_pool = [n for n in addable_pool if search_term.lower() in n.lower()]
             to_add_labels = st.multiselect(
