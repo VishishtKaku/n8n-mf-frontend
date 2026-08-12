@@ -91,6 +91,24 @@ def fit_logo_dims(img_bytes, max_w=190, max_h=54):
         return max_w, max_h
 
 
+def crop_sbi_logo(img_bytes, top_pct=0.30891, bottom_pct=0.32079):
+    """Matches the manual reference file's srcRect crop (t=30.891% b=32.079%)
+    -- the source PNG is a padded square canvas, this strips the whitespace
+    above/below the logo-mark so it reads as a wide banner instead of a small
+    padded square. Percentages are of image height, applied top and bottom."""
+    try:
+        img = PILImage.open(BytesIO(img_bytes)).convert("RGBA")
+        w, h = img.size
+        top = round(h * top_pct)
+        bottom = h - round(h * bottom_pct)
+        cropped = img.crop((0, top, w, bottom))
+        buf = BytesIO()
+        cropped.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception:
+        return img_bytes
+
+
 def multiselect_with_all(container, label, options, default_all=True, key=None, help=None):
     """Multiselect that allows any combination of options (unlike a selectbox,
     which forces exactly one choice at a time) plus an 'All' entry -- picking
@@ -354,19 +372,20 @@ def build_formatted_workbook(subset_df, title, bank_name=None):
 
     LOGO_ROW = 1
     TITLE_ROW = 2
-    ws.row_dimensions[LOGO_ROW].height = 60
+    ws.row_dimensions[LOGO_ROW].height = 120  # matches manual reference file
 
     sbi_logo_bytes = get_sbi_logo_bytes()
     if sbi_logo_bytes:
+        sbi_logo_bytes = crop_sbi_logo(sbi_logo_bytes)  # strip padding, matches manual crop
         img = XLImage(BytesIO(sbi_logo_bytes))
-        img.width, img.height = fit_logo_dims(sbi_logo_bytes)
+        img.width, img.height = fit_logo_dims(sbi_logo_bytes, max_w=316, max_h=117)
         img.anchor = f"{get_column_letter(LABEL_COL)}{LOGO_ROW}"
         ws.add_image(img)
 
     bank_logo_bytes = get_bank_logo_bytes(bank_name) if bank_name else None
     if bank_logo_bytes:
         img2 = XLImage(BytesIO(bank_logo_bytes))
-        img2.width, img2.height = fit_logo_dims(bank_logo_bytes)
+        img2.width, img2.height = fit_logo_dims(bank_logo_bytes, max_w=132, max_h=132)
         img2.anchor = f"{get_column_letter(SIP_END_COL)}{LOGO_ROW}"
         ws.add_image(img2)
 
