@@ -77,7 +77,7 @@ def _fetch_logo_bytes_by_url(url):
         return None
 
 
-def fit_logo_dims(img_bytes, max_w=140, max_h=40):
+def fit_logo_dims(img_bytes, max_w=190, max_h=54):
     """Scale a logo to fit within (max_w, max_h) preserving its real aspect
     ratio -- logos come in from arbitrary sources (square, wide, tall) and
     force-stretching every one into a fixed 140x40 box distorts most of them
@@ -354,7 +354,7 @@ def build_formatted_workbook(subset_df, title, bank_name=None):
 
     LOGO_ROW = 1
     TITLE_ROW = 2
-    ws.row_dimensions[LOGO_ROW].height = 46
+    ws.row_dimensions[LOGO_ROW].height = 60
 
     sbi_logo_bytes = get_sbi_logo_bytes()
     if sbi_logo_bytes:
@@ -367,7 +367,7 @@ def build_formatted_workbook(subset_df, title, bank_name=None):
     if bank_logo_bytes:
         img2 = XLImage(BytesIO(bank_logo_bytes))
         img2.width, img2.height = fit_logo_dims(bank_logo_bytes)
-        img2.anchor = f"{get_column_letter(SIP_END_COL - 2)}{LOGO_ROW}"
+        img2.anchor = f"{get_column_letter(SIP_END_COL)}{LOGO_ROW}"
         ws.add_image(img2)
 
     ws.merge_cells(start_row=TITLE_ROW, start_column=LABEL_COL, end_row=TITLE_ROW, end_column=SIP_END_COL)
