@@ -5,6 +5,7 @@ import requests
 from io import BytesIO
 from datetime import datetime, timezone
 from supabase import create_client
+from PIL import Image as PILImage
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.drawing.image import Image as XLImage
@@ -41,8 +42,12 @@ def get_sbi_logo_bytes():
         return None
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
 def get_bank_logo_bytes(bank_name):
+    """NOT cached at this level -- the bank_name -> logo_url table lookup must
+    always see the latest row. Caching here was the earlier bug: a None result
+    from before logo_url was populated got cached for up to an hour, silently
+    hiding a real logo that showed up moments later. Only the actual image
+    download (below) is cached, keyed on the URL itself."""
     if not bank_name:
         return None
     supabase = get_client()
@@ -57,11 +62,33 @@ def get_bank_logo_bytes(bank_name):
         rows = result.data
         if not rows or not rows[0].get("logo_url"):
             return None
-        resp = requests.get(rows[0]["logo_url"], timeout=5)
+        return _fetch_logo_bytes_by_url(rows[0]["logo_url"])
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_logo_bytes_by_url(url):
+    try:
+        resp = requests.get(url, timeout=5)
         resp.raise_for_status()
         return resp.content
     except Exception:
         return None
+
+
+def fit_logo_dims(img_bytes, max_w=140, max_h=40):
+    """Scale a logo to fit within (max_w, max_h) preserving its real aspect
+    ratio -- logos come in from arbitrary sources (square, wide, tall) and
+    force-stretching every one into a fixed 140x40 box distorts most of them
+    into an illegible smear. Returns (width, height) in px for XLImage."""
+    try:
+        img = PILImage.open(BytesIO(img_bytes))
+        w, h = img.size
+        scale = min(max_w / w, max_h / h)
+        return round(w * scale), round(h * scale)
+    except Exception:
+        return max_w, max_h
 
 
 def multiselect_with_all(container, label, options, default_all=True, key=None, help=None):
@@ -332,14 +359,14 @@ def build_formatted_workbook(subset_df, title, bank_name=None):
     sbi_logo_bytes = get_sbi_logo_bytes()
     if sbi_logo_bytes:
         img = XLImage(BytesIO(sbi_logo_bytes))
-        img.width, img.height = 140, 40
+        img.width, img.height = fit_logo_dims(sbi_logo_bytes)
         img.anchor = f"{get_column_letter(LABEL_COL)}{LOGO_ROW}"
         ws.add_image(img)
 
     bank_logo_bytes = get_bank_logo_bytes(bank_name) if bank_name else None
     if bank_logo_bytes:
         img2 = XLImage(BytesIO(bank_logo_bytes))
-        img2.width, img2.height = 140, 40
+        img2.width, img2.height = fit_logo_dims(bank_logo_bytes)
         img2.anchor = f"{get_column_letter(SIP_END_COL - 2)}{LOGO_ROW}"
         ws.add_image(img2)
 
