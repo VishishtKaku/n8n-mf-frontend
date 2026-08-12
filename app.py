@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import os
-import re
+import requests
 from io import BytesIO
 from datetime import datetime, timezone
 from supabase import create_client
@@ -13,12 +13,13 @@ st.set_page_config(page_title="SBI Fund Returns Dashboard", layout="wide")
 
 PERIOD_ORDER = ["1W", "1M", "3M", "6M", "YTD", "1Y", "2Y", "3Y", "5Y", "10Y", "SI"]
 
-# Print assets: SBI MF logo is constant, add the file yourself at this path in
-# the repo. Bank logos are looked up by a slug of the bank name -- e.g. "AU
-# Small Finance Bank" -> assets/bank_logos/au_small_finance_bank.png. Missing
-# files are skipped silently (no crash), that side of the header is just blank.
-SBI_MF_LOGO_PATH = "assets/sbi_mf_logo.png"
-BANK_LOGO_DIR = "assets/bank_logos"
+# Print assets: pulled from Supabase Storage bucket "logos" (public) at export
+# time, not from local disk -- lets the n8n bank-logo-sync workflow keep
+# bank_logos populated independently of any frontend deploy. SBI logo path is
+# constant; bank logos are resolved via the bank_logos table (bank_name ->
+# logo_url). Missing row/URL/failed fetch all fall through to None -- same
+# silent skip as before, that side of the header just stays blank, no crash.
+SBI_LOGO_STORAGE_PATH = "logos/sbi_mf_logo.png"
 
 # SEBI-mandated mutual fund disclaimer -- edit the wording here if your
 # compliance team wants different phrasing. Repeats on every printed page.
@@ -28,17 +29,39 @@ MF_DISCLAIMER_TEXT = (
 )
 
 
-def slugify_bank_name(name):
-    return re.sub(r"[^a-z0-9]+", "_", (name or "").lower()).strip("_")
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_sbi_logo_bytes():
+    base_url = st.secrets["SUPABASE_URL"]
+    logo_url = f"{base_url}/storage/v1/object/public/{SBI_LOGO_STORAGE_PATH}"
+    try:
+        resp = requests.get(logo_url, timeout=5)
+        resp.raise_for_status()
+        return resp.content
+    except Exception:
+        return None
 
 
-def bank_logo_path(bank_name):
-    path = os.path.join(BANK_LOGO_DIR, f"{slugify_bank_name(bank_name)}.png")
-    return path if os.path.exists(path) else None
-
-
-def sbi_logo_path():
-    return SBI_MF_LOGO_PATH if os.path.exists(SBI_MF_LOGO_PATH) else None
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_bank_logo_bytes(bank_name):
+    if not bank_name:
+        return None
+    supabase = get_client()
+    try:
+        result = (
+            supabase.table("bank_logos")
+            .select("logo_url")
+            .eq("bank_name", bank_name)
+            .limit(1)
+            .execute()
+        )
+        rows = result.data
+        if not rows or not rows[0].get("logo_url"):
+            return None
+        resp = requests.get(rows[0]["logo_url"], timeout=5)
+        resp.raise_for_status()
+        return resp.content
+    except Exception:
+        return None
 
 
 def multiselect_with_all(container, label, options, default_all=True, key=None, help=None):
@@ -306,16 +329,16 @@ def build_formatted_workbook(subset_df, title, bank_name=None):
     TITLE_ROW = 2
     ws.row_dimensions[LOGO_ROW].height = 46
 
-    sbi_logo = sbi_logo_path()
-    if sbi_logo:
-        img = XLImage(sbi_logo)
+    sbi_logo_bytes = get_sbi_logo_bytes()
+    if sbi_logo_bytes:
+        img = XLImage(BytesIO(sbi_logo_bytes))
         img.width, img.height = 140, 40
         img.anchor = f"{get_column_letter(LABEL_COL)}{LOGO_ROW}"
         ws.add_image(img)
 
-    logo_path = bank_logo_path(bank_name) if bank_name else None
-    if logo_path:
-        img2 = XLImage(logo_path)
+    bank_logo_bytes = get_bank_logo_bytes(bank_name) if bank_name else None
+    if bank_logo_bytes:
+        img2 = XLImage(BytesIO(bank_logo_bytes))
         img2.width, img2.height = 140, 40
         img2.anchor = f"{get_column_letter(SIP_END_COL - 2)}{LOGO_ROW}"
         ws.add_image(img2)
@@ -432,15 +455,17 @@ def build_formatted_workbook(subset_df, title, bank_name=None):
     # Print setup for hardcopy: logo+title rows repeat at the top of every
     # printed page (Excel's print titles), mutual fund disclaimer in the
     # footer -- footers repeat on every printed page automatically, regardless
-    # of how many pages the export spans. Printing at natural 100% scale
-    # (not forced to fit one page width) -- this table is 20 columns wide,
-    # forcing it onto a single page shrinks everything to unreadable size;
-    # spilling across 2 pages wide at full size is far more legible.
+    # of how many pages the export spans. Fit to page WIDTH only (fitToHeight=0
+    # means unlimited pages tall) -- all columns land on one page across, rows
+    # spill down onto as many pages as needed. HeaderFooter.scaleWithDoc=False
+    # keeps the footer text a fixed readable size independent of the body's
+    # width-scaling, so this doesn't reintroduce the earlier tiny-footer bug.
     ws.print_title_rows = f"{LOGO_ROW}:{TITLE_ROW}"
     ws.page_setup.orientation = "landscape"
-    ws.page_setup.fitToPage = False
-    ws.page_setup.scale = 100
-    ws.sheet_properties.pageSetUpPr.fitToPage = False
+    ws.page_setup.fitToPage = True
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
     ws.HeaderFooter.scaleWithDoc = False  # keep footer text size fixed, independent of body scale
     ws.oddFooter.center.text = MF_DISCLAIMER_TEXT
     ws.oddFooter.center.size = 10
