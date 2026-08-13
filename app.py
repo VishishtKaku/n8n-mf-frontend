@@ -235,25 +235,64 @@ def validate_session(token):
 
 def inject_theme_css():
     """No config.toml swap possible mid-session -- this overlays CSS instead.
-    Light theme = do nothing, config.toml defaults already apply."""
+    Light theme = do nothing, config.toml defaults already apply. Heavy use
+    of !important because pandas Styler injects its own inline/ID-scoped
+    CSS (higher specificity) for the returns table, and BaseWeb widgets
+    (multiselect/selectbox/input) ship their own theme vars that a plain
+    type-selector can't outrank without it."""
     if st.session_state.get("theme") != "dark":
         return
     st.markdown(
         """
         <style>
-        .stApp { background-color: #0E1117; color: #FAFAFA; }
-        section[data-testid="stSidebar"] { background-color: #161A23; }
-        section[data-testid="stSidebar"] * { color: #FAFAFA; }
-        h1, h2, h3, h4, h5, h6, p, span, label, .stMarkdown { color: #FAFAFA; }
-        div[data-testid="stTable"] table { background-color: #161A23; color: #FAFAFA; }
-        div[data-testid="stTable"] th { background-color: #232733 !important; color: #FAFAFA !important; }
-        .stDataFrame { background-color: #161A23; }
-        div[data-testid="stMetric"], div[data-baseweb="input"], div[data-baseweb="select"] {
-            background-color: #232733; color: #FAFAFA;
+        .stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"],
+        [data-testid="stMain"], .main .block-container {
+            background-color: #0E1117 !important; color: #FAFAFA !important;
         }
-        .stButton button { background-color: #232733; color: #FAFAFA; border: 1px solid #3A3F4B; }
-        .stTabs [data-baseweb="tab"] { color: #FAFAFA; }
-        [data-testid="stCaptionContainer"] { color: #B0B4BC; }
+        section[data-testid="stSidebar"] { background-color: #161A23 !important; }
+        section[data-testid="stSidebar"] * { color: #FAFAFA !important; }
+        h1, h2, h3, h4, h5, h6, p, span, label, div, .stMarkdown { color: #FAFAFA !important; }
+
+        /* Returns table -- pandas Styler ships its own ID-scoped CSS, needs !important to beat it */
+        div[data-testid="stTable"] table,
+        div[data-testid="stTable"] td, div[data-testid="stTable"] th {
+            background-color: #161A23 !important; color: #FAFAFA !important;
+            border-color: #3A3F4B !important;
+        }
+        div[data-testid="stTable"] th { background-color: #232733 !important; }
+
+        /* st.dataframe (glide-data-grid canvas) -- CSS can't reach the canvas
+        itself, only its chrome; dark mode leaves the grid on Streamlit's own
+        theme, which already auto-follows .stApp reasonably well. */
+        .stDataFrame { background-color: #161A23 !important; }
+
+        /* Inputs, selects, multiselects (BaseWeb) */
+        div[data-baseweb="input"], div[data-baseweb="select"] > div,
+        div[data-baseweb="base-input"], input, textarea {
+            background-color: #232733 !important; color: #FAFAFA !important;
+            border-color: #3A3F4B !important;
+        }
+        div[data-baseweb="tag"] { background-color: #1E4B8C !important; }
+        div[data-baseweb="tag"] span { color: #FAFAFA !important; }
+        ul[data-baseweb="menu"], div[data-baseweb="popover"] {
+            background-color: #232733 !important; color: #FAFAFA !important;
+        }
+        li[data-baseweb="menu-item"] { background-color: #232733 !important; color: #FAFAFA !important; }
+        li[data-baseweb="menu-item"]:hover { background-color: #2E3440 !important; }
+
+        /* Buttons, including download buttons -- default download button
+        keeps a white background from Streamlit's base theme otherwise */
+        .stButton button, .stDownloadButton button, [data-testid="stFormSubmitButton"] button {
+            background-color: #232733 !important; color: #FAFAFA !important;
+            border: 1px solid #3A3F4B !important;
+        }
+        .stButton button:hover, .stDownloadButton button:hover { border-color: #1E4B8C !important; }
+
+        .stTabs [data-baseweb="tab"] { color: #FAFAFA !important; }
+        .stTabs [aria-selected="true"] { color: #1E4B8C !important; }
+        [data-testid="stCaptionContainer"], .stCaption { color: #B0B4BC !important; }
+        .stRadio label, .stCheckbox label { color: #FAFAFA !important; }
+        hr { border-color: #3A3F4B !important; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -400,6 +439,20 @@ def apply_return_convention(df, convention):
 
 
 @st.cache_data(ttl=120)
+def list_registered_banks():
+    """Banks table is the source of truth for 'does this bank exist', separate
+    from bank_fund_approvals -- so a bank with 0 currently-approved funds still
+    shows up here. Only remove_bank() deletes from this table."""
+    supabase = get_client()
+    resp = supabase.table("banks").select("bank_name").order("bank_name").execute()
+    return [r["bank_name"] for r in resp.data]
+
+
+def register_bank(bank_name):
+    supabase = get_admin_client()
+    supabase.table("banks").upsert({"bank_name": bank_name}, on_conflict="bank_name").execute()
+
+
 def load_bank_approvals():
     supabase = get_client()
     resp = (
@@ -442,7 +495,9 @@ def write_bank_approvals(bank_name, scheme_codes):
 
 def add_bank_approvals(bank_name, scheme_codes):
     """Approves the given funds for a bank -- additive only, never touches
-    any other existing approval for this bank."""
+    any other existing approval for this bank. Registers the bank in the
+    `banks` table too, so it persists even if later dropped to 0 funds."""
+    register_bank(bank_name)
     if not scheme_codes:
         return 0
     supabase = get_admin_client()
@@ -471,8 +526,10 @@ def remove_selected_bank_approvals(bank_name, scheme_codes):
 
 
 def remove_bank(bank_name):
-    """Unapprove every fund for this bank (approved=false for all its rows,
-    same pattern as write_bank_approvals -- never hard-deletes, keeps history)."""
+    """The only place a bank actually disappears -- unapproves any remaining
+    funds AND deletes the `banks` registry row. Runs the delete unconditionally
+    (not gated on codes being non-empty) so a bank already at 0 approved funds
+    can still be removed via this path."""
     supabase = get_admin_client()
     now = datetime.now(timezone.utc).isoformat()
     existing = (
@@ -482,14 +539,14 @@ def remove_bank(bank_name):
         .execute()
     )
     codes = [r["scheme_code"] for r in existing.data]
-    if not codes:
-        return 0
-    rows = [
-        {"bank_name": bank_name, "scheme_code": int(c), "approved": False, "updated_at": now}
-        for c in codes
-    ]
-    supabase.table("bank_fund_approvals").upsert(rows, on_conflict="bank_name,scheme_code").execute()
-    return len(rows)
+    if codes:
+        rows = [
+            {"bank_name": bank_name, "scheme_code": int(c), "approved": False, "updated_at": now}
+            for c in codes
+        ]
+        supabase.table("bank_fund_approvals").upsert(rows, on_conflict="bank_name,scheme_code").execute()
+    supabase.table("banks").delete().eq("bank_name", bank_name).execute()
+    return len(codes)
 
 
 def fmt_pct(x):
@@ -966,11 +1023,7 @@ if is_admin_user:
 
         st.markdown("### Manage Bank Approved Funds")
 
-        _approvals_for_banks = load_bank_approvals()
-        existing_banks = (
-            sorted(_approvals_for_banks["bank_name"].unique().tolist())
-            if not _approvals_for_banks.empty else []
-        )
+        existing_banks = list_registered_banks()
         bank_choice_mode = st.radio(
             "Bank", ["Choose existing", "Add new", "Remove bank"], horizontal=True, key="bank_mode"
         )
