@@ -2,8 +2,10 @@ import streamlit as st
 import pandas as pd
 import os
 import requests
+import bcrypt
+import secrets as pysecrets
 from io import BytesIO
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from supabase import create_client
 from PIL import Image as PILImage
 from openpyxl import Workbook
@@ -11,6 +13,8 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.drawing.image import Image as XLImage
 
 st.set_page_config(page_title="SBI Fund Returns Dashboard", layout="wide")
+
+SESSION_TTL_HOURS = 24 * 7  # 7 days, sliding on each login (not on every rerun)
 
 PERIOD_ORDER = ["1W", "1M", "3M", "6M", "YTD", "1Y", "2Y", "3Y", "5Y", "10Y", "SI"]
 
@@ -128,6 +132,196 @@ def get_client():
     return create_client(url, key)
 
 
+def get_admin_client():
+    """service_role key -- bypasses RLS entirely. Used only for: account/session
+    tables (app_users, app_sessions -- zero anon access, sealed even if the anon
+    key leaks) and admin-gated bank-approval writes (RLS denies anon writes on
+    bank_fund_approvals, only app.py's is_admin_user-gated call sites reach this
+    client). Key lives in secrets.toml, server-side only -- Streamlit never
+    ships it to the browser."""
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_SERVICE_ROLE_KEY"]
+    return create_client(url, key)
+
+
+# ============================================================
+# ACCOUNTS / AUTH — app_users + app_sessions tables in Supabase.
+# Session token is a random 256-bit value (pysecrets.token_hex(32)) --
+# not derived from anything, so it can't be forged or decoded, only
+# stolen if the URL itself leaks. Kept in st.query_params so a page
+# refresh doesn't log the user out. Validated against app_sessions on
+# every rerun (checks expiry, joins app_users for role).
+# ============================================================
+
+def hash_password(pw):
+    return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
+
+
+def verify_password(pw, pw_hash):
+    try:
+        return bcrypt.checkpw(pw.encode(), pw_hash.encode())
+    except Exception:
+        return False
+
+
+def create_user(username, password, role="employee"):
+    supabase = get_admin_client()
+    existing = supabase.table("app_users").select("user_id").eq("username", username).execute()
+    if existing.data:
+        return None, "Username already taken."
+    row = {
+        "username": username,
+        "password_hash": hash_password(password),
+        "role": role,
+    }
+    resp = supabase.table("app_users").insert(row).execute()
+    if not resp.data:
+        return None, "Signup failed -- try again."
+    return resp.data[0], None
+
+
+def authenticate(username, password):
+    supabase = get_admin_client()
+    resp = supabase.table("app_users").select("user_id,username,password_hash,role").eq(
+        "username", username
+    ).execute()
+    if not resp.data:
+        return None, "No account with that username."
+    user = resp.data[0]
+    if not verify_password(password, user["password_hash"]):
+        return None, "Incorrect password."
+    return user, None
+
+
+def create_session(user_id):
+    supabase = get_admin_client()
+    token = pysecrets.token_hex(32)
+    expires_at = (datetime.now(timezone.utc) + timedelta(hours=SESSION_TTL_HOURS)).isoformat()
+    supabase.table("app_sessions").insert(
+        {"token": token, "user_id": user_id, "expires_at": expires_at}
+    ).execute()
+    return token
+
+
+def destroy_session(token):
+    if not token:
+        return
+    supabase = get_admin_client()
+    supabase.table("app_sessions").delete().eq("token", token).execute()
+
+
+def validate_session(token):
+    """Returns {"user_id","username","role"} or None. Deletes the row and
+    returns None if expired -- dead tokens don't linger in the table."""
+    if not token:
+        return None
+    supabase = get_admin_client()
+    resp = (
+        supabase.table("app_sessions")
+        .select("user_id,expires_at,app_users(username,role)")
+        .eq("token", token)
+        .execute()
+    )
+    if not resp.data:
+        return None
+    row = resp.data[0]
+    expires_at = datetime.fromisoformat(row["expires_at"])
+    if datetime.now(timezone.utc) > expires_at:
+        destroy_session(token)
+        return None
+    user = row.get("app_users") or {}
+    return {"user_id": row["user_id"], "username": user.get("username"), "role": user.get("role", "employee")}
+
+
+def inject_theme_css():
+    """No config.toml swap possible mid-session -- this overlays CSS instead.
+    Light theme = do nothing, config.toml defaults already apply."""
+    if st.session_state.get("theme") != "dark":
+        return
+    st.markdown(
+        """
+        <style>
+        .stApp { background-color: #0E1117; color: #FAFAFA; }
+        section[data-testid="stSidebar"] { background-color: #161A23; }
+        section[data-testid="stSidebar"] * { color: #FAFAFA; }
+        h1, h2, h3, h4, h5, h6, p, span, label, .stMarkdown { color: #FAFAFA; }
+        div[data-testid="stTable"] table { background-color: #161A23; color: #FAFAFA; }
+        div[data-testid="stTable"] th { background-color: #232733 !important; color: #FAFAFA !important; }
+        .stDataFrame { background-color: #161A23; }
+        div[data-testid="stMetric"], div[data-baseweb="input"], div[data-baseweb="select"] {
+            background-color: #232733; color: #FAFAFA;
+        }
+        .stButton button { background-color: #232733; color: #FAFAFA; border: 1px solid #3A3F4B; }
+        .stTabs [data-baseweb="tab"] { color: #FAFAFA; }
+        [data-testid="stCaptionContainer"] { color: #B0B4BC; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_auth_gate():
+    """Blocks the whole app until a valid session exists. Returns the
+    current user dict once logged in."""
+    qp_token = st.query_params.get("t")
+    if "auth_user" not in st.session_state:
+        st.session_state.auth_user = validate_session(qp_token) if qp_token else None
+
+    if st.session_state.auth_user:
+        return st.session_state.auth_user
+
+    st.title("SBI Fund Returns Dashboard")
+    st.subheader("Sign in")
+    mode = st.radio("", ["Log in", "Sign up"], horizontal=True, key="auth_mode", label_visibility="collapsed")
+
+    if mode == "Log in":
+        with st.form("login_form"):
+            username = st.text_input("Username", key="login_username")
+            password = st.text_input("Password", type="password", key="login_password")
+            submitted = st.form_submit_button("Log in")
+        if submitted:
+            if not username or not password:
+                st.error("Enter both username and password.")
+            else:
+                user, err = authenticate(username, password)
+                if err:
+                    st.error(err)
+                else:
+                    token = create_session(user["user_id"])
+                    st.session_state.auth_user = {
+                        "user_id": user["user_id"], "username": user["username"], "role": user["role"]
+                    }
+                    st.query_params["t"] = token
+                    st.rerun()
+    else:
+        with st.form("signup_form"):
+            new_username = st.text_input("Choose a username", key="signup_username")
+            new_password = st.text_input("Choose a password", type="password", key="signup_password")
+            confirm_password = st.text_input("Confirm password", type="password", key="signup_confirm")
+            submitted = st.form_submit_button("Sign up")
+        if submitted:
+            if not new_username or not new_password:
+                st.error("Fill in all fields.")
+            elif new_password != confirm_password:
+                st.error("Passwords don't match.")
+            elif len(new_password) < 8:
+                st.error("Password must be at least 8 characters.")
+            else:
+                user, err = create_user(new_username, new_password, role="employee")
+                if err:
+                    st.error(err)
+                else:
+                    st.success("Account created. New accounts default to 'employee' access -- ask an admin to upgrade you in Supabase if you need Fund Builder access.")
+                    token = create_session(user["user_id"])
+                    st.session_state.auth_user = {
+                        "user_id": user["user_id"], "username": user["username"], "role": user["role"]
+                    }
+                    st.query_params["t"] = token
+                    st.rerun()
+
+    st.stop()
+
+
 @st.cache_data(ttl=300)
 def load_funds_and_returns():
     supabase = get_client()
@@ -220,7 +414,7 @@ def load_bank_approvals():
 def write_bank_approvals(bank_name, scheme_codes):
     """Full-sync: selected funds become approved=true for this bank,
     any previously-approved-but-now-unselected funds become approved=false."""
-    supabase = get_client()
+    supabase = get_admin_client()
     now = datetime.now(timezone.utc).isoformat()
 
     existing = (
@@ -251,7 +445,7 @@ def add_bank_approvals(bank_name, scheme_codes):
     any other existing approval for this bank."""
     if not scheme_codes:
         return 0
-    supabase = get_client()
+    supabase = get_admin_client()
     now = datetime.now(timezone.utc).isoformat()
     rows = [
         {"bank_name": bank_name, "scheme_code": int(c), "approved": True, "updated_at": now}
@@ -266,7 +460,7 @@ def remove_selected_bank_approvals(bank_name, scheme_codes):
     this bank is left untouched."""
     if not scheme_codes:
         return 0
-    supabase = get_client()
+    supabase = get_admin_client()
     now = datetime.now(timezone.utc).isoformat()
     rows = [
         {"bank_name": bank_name, "scheme_code": int(c), "approved": False, "updated_at": now}
@@ -274,9 +468,12 @@ def remove_selected_bank_approvals(bank_name, scheme_codes):
     ]
     supabase.table("bank_fund_approvals").upsert(rows, on_conflict="bank_name,scheme_code").execute()
     return len(rows)
+
+
+def remove_bank(bank_name):
     """Unapprove every fund for this bank (approved=false for all its rows,
     same pattern as write_bank_approvals -- never hard-deletes, keeps history)."""
-    supabase = get_client()
+    supabase = get_admin_client()
     now = datetime.now(timezone.utc).isoformat()
     existing = (
         supabase.table("bank_fund_approvals")
@@ -558,12 +755,29 @@ def render_fund_block(fund_rows, scheme_code):
     st.markdown("")
 
 
-st.title("SBI Fund Returns Dashboard")
+if "theme" not in st.session_state:
+    st.session_state.theme = "light"
 
-top1, top2 = st.columns([1, 5])
+current_user = render_auth_gate()
+inject_theme_css()
+
+top1, top2, top3, top4 = st.columns([3, 1, 1, 1])
 with top1:
+    st.title("SBI Fund Returns Dashboard")
+with top2:
     if st.button("Refresh data"):
         st.cache_data.clear()
+with top3:
+    theme_label = "Light mode" if st.session_state.theme == "dark" else "Dark mode"
+    if st.button(theme_label, key="theme_toggle"):
+        st.session_state.theme = "light" if st.session_state.theme == "dark" else "dark"
+        st.rerun()
+with top4:
+    if st.button(f"Log out ({current_user['username']})", key="logout_btn"):
+        destroy_session(st.query_params.get("t"))
+        st.session_state.auth_user = None
+        st.query_params.clear()
+        st.rerun()
 
 with st.spinner("Loading fund data..."):
     data, funds_only_df = load_funds_and_returns()
@@ -593,9 +807,14 @@ convention_choice = st.sidebar.radio(
 convention = "after" if convention_choice == "Nearest next trading day" else "before"
 data = apply_return_convention(data, convention)
 
-tab_all, tab_bank, tab_builder = st.tabs(
-    ["All Funds", "Bank Approved Funds", "Fund Builder (Admin)"]
-)
+is_admin_user = current_user["role"] == "admin"
+
+if is_admin_user:
+    tab_all, tab_bank, tab_builder = st.tabs(
+        ["All Funds", "Bank Approved Funds", "Fund Builder (Admin)"]
+    )
+else:
+    tab_all, tab_bank = st.tabs(["All Funds", "Bank Approved Funds"])
 
 # ============================================================
 # TAB 1 — All funds (unchanged from before)
@@ -739,35 +958,11 @@ with tab_bank:
             render_fund_block(bank_data[bank_data["scheme_code"] == scheme_code], scheme_code)
 
 # ============================================================
-# TAB 3 — Fund Builder (Admin) — password gated
+# TAB 3 — Fund Builder (Admin) — gated by account role, not a shared password
 # ============================================================
-with tab_builder:
-    st.subheader("Admin access required")
-
-    if "is_admin" not in st.session_state:
-        st.session_state.is_admin = False
-
-    if not st.session_state.is_admin:
-        pw = st.text_input("Admin password", type="password", key="admin_pw")
-        if st.button("Log in", key="admin_login_btn"):
-            if pw and pw == st.secrets.get("ADMIN_PASSWORD"):
-                st.session_state.is_admin = True
-                st.rerun()
-            else:
-                st.error("Incorrect password.")
-        st.caption(
-            "Note: this is a single shared password checked in the app, not real per-user "
-            "accounts — anyone with this password has full edit access. Fine for now; "
-            "move to proper accounts (Supabase Auth) before this goes fully live."
-        )
-    else:
-        c1, c2 = st.columns([4, 1])
-        with c1:
-            st.success("Logged in as admin.")
-        with c2:
-            if st.button("Log out"):
-                st.session_state.is_admin = False
-                st.rerun()
+if is_admin_user:
+    with tab_builder:
+        st.success(f"Logged in as admin: {current_user['username']}")
 
         st.markdown("### Manage Bank Approved Funds")
 
