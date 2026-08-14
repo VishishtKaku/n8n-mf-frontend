@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import os
 import requests
@@ -307,20 +308,6 @@ def inject_theme_css():
         }
         body.dark-theme .stRadio label, body.dark-theme .stCheckbox label { color: #FAFAFA !important; }
         body.dark-theme hr { border-color: #3A3F4B !important; }
-
-        /* The toggle button itself -- styled to match Streamlit's native
-        .stButton look so it doesn't stick out, since it's plain HTML/JS,
-        not a real Streamlit widget (that's the whole point -- no rerun) */
-        #theme-toggle-btn {
-            width: 100%; padding: 0.5rem 1rem; border-radius: 0.5rem;
-            border: 1px solid rgba(49, 51, 63, 0.2); background-color: #FFFFFF;
-            color: #31333F; font-size: 1rem; cursor: pointer; font-family: inherit;
-        }
-        #theme-toggle-btn:hover { border-color: #1E4B8C; color: #1E4B8C; }
-        body.dark-theme #theme-toggle-btn {
-            background-color: #232733 !important; color: #FAFAFA !important;
-            border: 1px solid #3A3F4B !important;
-        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -855,13 +842,30 @@ with top2:
     if st.button("Refresh data"):
         st.cache_data.clear()
 with top3:
-    st.markdown(
-        """<button id="theme-toggle-btn" onclick="
-            document.body.classList.toggle('dark-theme');
-            document.getElementById('theme-toggle-btn').textContent =
-                document.body.classList.contains('dark-theme') ? 'Light mode' : 'Dark mode';
-        ">Dark mode</button>""",
-        unsafe_allow_html=True,
+    components.html(
+        """
+        <button id="theme-toggle-btn" style="
+            width: 100%; padding: 0.5rem 1rem; border-radius: 0.5rem;
+            border: 1px solid rgba(49, 51, 63, 0.2); background-color: #FFFFFF;
+            color: #31333F; font-size: 1rem; cursor: pointer; font-family: inherit;
+        ">Dark mode</button>
+        <script>
+        // components.html runs in its own iframe -- window.parent reaches the
+        // main Streamlit document (same-origin, allowed). st.markdown's
+        // onclick attribute gets stripped by Streamlit's HTML sanitizer even
+        // with unsafe_allow_html=True, this is the actual workaround.
+        const btn = document.getElementById('theme-toggle-btn');
+        btn.addEventListener('click', function () {
+            const body = window.parent.document.body;
+            const isDark = body.classList.toggle('dark-theme');
+            btn.textContent = isDark ? 'Light mode' : 'Dark mode';
+            btn.style.backgroundColor = isDark ? '#232733' : '#FFFFFF';
+            btn.style.color = isDark ? '#FAFAFA' : '#31333F';
+            btn.style.borderColor = isDark ? '#3A3F4B' : 'rgba(49, 51, 63, 0.2)';
+        });
+        </script>
+        """,
+        height=48,
     )
 with top4:
     if st.button(f"Log out ({current_user['username']})", key="logout_btn"):
