@@ -234,65 +234,93 @@ def validate_session(token):
 
 
 def inject_theme_css():
-    """No config.toml swap possible mid-session -- this overlays CSS instead.
-    Light theme = do nothing, config.toml defaults already apply. Heavy use
-    of !important because pandas Styler injects its own inline/ID-scoped
-    CSS (higher specificity) for the returns table, and BaseWeb widgets
-    (multiselect/selectbox/input) ship their own theme vars that a plain
-    type-selector can't outrank without it."""
-    if st.session_state.get("theme") != "dark":
-        return
+    """Client-side only -- a JS class toggle on <body>, no st.rerun(). CSS
+    below is scoped under body.dark-theme so it's always present in the DOM
+    but inert until the class is added; toggling is instant since no
+    server round-trip happens. Trade-off vs the old session_state approach:
+    doesn't survive an actual browser refresh (no server state backs it),
+    only a full F5 resets to light. Heavy !important use because pandas
+    Styler injects its own ID-scoped CSS for the returns table, and BaseWeb
+    widgets (multiselect/selectbox/input/popover) ship their own theme vars
+    that a plain type-selector can't outrank without it."""
     st.markdown(
         """
         <style>
-        .stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"],
-        [data-testid="stMain"], .main .block-container {
+        body.dark-theme .stApp, body.dark-theme [data-testid="stAppViewContainer"],
+        body.dark-theme [data-testid="stHeader"], body.dark-theme [data-testid="stMain"],
+        body.dark-theme .main .block-container {
             background-color: #0E1117 !important; color: #FAFAFA !important;
         }
-        section[data-testid="stSidebar"] { background-color: #161A23 !important; }
-        section[data-testid="stSidebar"] * { color: #FAFAFA !important; }
-        h1, h2, h3, h4, h5, h6, p, span, label, div, .stMarkdown { color: #FAFAFA !important; }
+        body.dark-theme section[data-testid="stSidebar"] { background-color: #161A23 !important; }
+        body.dark-theme section[data-testid="stSidebar"] * { color: #FAFAFA !important; }
+        body.dark-theme h1, body.dark-theme h2, body.dark-theme h3, body.dark-theme h4,
+        body.dark-theme h5, body.dark-theme h6, body.dark-theme p, body.dark-theme span,
+        body.dark-theme label, body.dark-theme div, body.dark-theme .stMarkdown {
+            color: #FAFAFA !important;
+        }
 
         /* Returns table -- pandas Styler ships its own ID-scoped CSS, needs !important to beat it */
-        div[data-testid="stTable"] table,
-        div[data-testid="stTable"] td, div[data-testid="stTable"] th {
+        body.dark-theme div[data-testid="stTable"] table,
+        body.dark-theme div[data-testid="stTable"] td, body.dark-theme div[data-testid="stTable"] th {
             background-color: #161A23 !important; color: #FAFAFA !important;
             border-color: #3A3F4B !important;
         }
-        div[data-testid="stTable"] th { background-color: #232733 !important; }
+        body.dark-theme div[data-testid="stTable"] th { background-color: #232733 !important; }
 
-        /* st.dataframe (glide-data-grid canvas) -- CSS can't reach the canvas
-        itself, only its chrome; dark mode leaves the grid on Streamlit's own
-        theme, which already auto-follows .stApp reasonably well. */
-        .stDataFrame { background-color: #161A23 !important; }
+        body.dark-theme .stDataFrame { background-color: #161A23 !important; }
 
         /* Inputs, selects, multiselects (BaseWeb) */
-        div[data-baseweb="input"], div[data-baseweb="select"] > div,
-        div[data-baseweb="base-input"], input, textarea {
+        body.dark-theme div[data-baseweb="input"], body.dark-theme div[data-baseweb="select"] > div,
+        body.dark-theme div[data-baseweb="base-input"], body.dark-theme input, body.dark-theme textarea {
             background-color: #232733 !important; color: #FAFAFA !important;
             border-color: #3A3F4B !important;
         }
-        div[data-baseweb="tag"] { background-color: #1E4B8C !important; }
-        div[data-baseweb="tag"] span { color: #FAFAFA !important; }
-        ul[data-baseweb="menu"], div[data-baseweb="popover"] {
+        body.dark-theme div[data-baseweb="tag"] { background-color: #1E4B8C !important; }
+        body.dark-theme div[data-baseweb="tag"] span { color: #FAFAFA !important; }
+        body.dark-theme [data-baseweb="popover"], body.dark-theme [data-baseweb="popover"] * {
             background-color: #232733 !important; color: #FAFAFA !important;
         }
-        li[data-baseweb="menu-item"] { background-color: #232733 !important; color: #FAFAFA !important; }
-        li[data-baseweb="menu-item"]:hover { background-color: #2E3440 !important; }
+        body.dark-theme ul[role="listbox"], body.dark-theme li[role="option"],
+        body.dark-theme div[role="option"] {
+            background-color: #232733 !important; color: #FAFAFA !important;
+        }
+        body.dark-theme li[role="option"]:hover, body.dark-theme li[aria-selected="true"],
+        body.dark-theme div[role="option"]:hover {
+            background-color: #2E3440 !important;
+        }
 
         /* Buttons, including download buttons -- default download button
         keeps a white background from Streamlit's base theme otherwise */
-        .stButton button, .stDownloadButton button, [data-testid="stFormSubmitButton"] button {
+        body.dark-theme .stButton button, body.dark-theme .stDownloadButton button,
+        body.dark-theme [data-testid="stFormSubmitButton"] button {
             background-color: #232733 !important; color: #FAFAFA !important;
             border: 1px solid #3A3F4B !important;
         }
-        .stButton button:hover, .stDownloadButton button:hover { border-color: #1E4B8C !important; }
+        body.dark-theme .stButton button:hover, body.dark-theme .stDownloadButton button:hover {
+            border-color: #1E4B8C !important;
+        }
 
-        .stTabs [data-baseweb="tab"] { color: #FAFAFA !important; }
-        .stTabs [aria-selected="true"] { color: #1E4B8C !important; }
-        [data-testid="stCaptionContainer"], .stCaption { color: #B0B4BC !important; }
-        .stRadio label, .stCheckbox label { color: #FAFAFA !important; }
-        hr { border-color: #3A3F4B !important; }
+        body.dark-theme .stTabs [data-baseweb="tab"] { color: #FAFAFA !important; }
+        body.dark-theme .stTabs [aria-selected="true"] { color: #1E4B8C !important; }
+        body.dark-theme [data-testid="stCaptionContainer"], body.dark-theme .stCaption {
+            color: #B0B4BC !important;
+        }
+        body.dark-theme .stRadio label, body.dark-theme .stCheckbox label { color: #FAFAFA !important; }
+        body.dark-theme hr { border-color: #3A3F4B !important; }
+
+        /* The toggle button itself -- styled to match Streamlit's native
+        .stButton look so it doesn't stick out, since it's plain HTML/JS,
+        not a real Streamlit widget (that's the whole point -- no rerun) */
+        #theme-toggle-btn {
+            width: 100%; padding: 0.5rem 1rem; border-radius: 0.5rem;
+            border: 1px solid rgba(49, 51, 63, 0.2); background-color: #FFFFFF;
+            color: #31333F; font-size: 1rem; cursor: pointer; font-family: inherit;
+        }
+        #theme-toggle-btn:hover { border-color: #1E4B8C; color: #1E4B8C; }
+        body.dark-theme #theme-toggle-btn {
+            background-color: #232733 !important; color: #FAFAFA !important;
+            border: 1px solid #3A3F4B !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -601,8 +629,13 @@ def build_formatted_workbook(subset_df, title, bank_name=None):
 
     col_max_len = {}
 
-    GREEN_FONT = Font(color="1E7B34")
-    RED_FONT = Font(color="C00000")
+    # Excel export stays black regardless of sign -- green/red is only for
+    # the in-app st.table display (color_returns(), further down). colorize
+    # flag on set_cell() left in place (still marks which cells are actual
+    # return values vs labels/dates) but both branches now render identically.
+    BLACK_FONT = Font(color="000000")
+    GREEN_FONT = BLACK_FONT
+    RED_FONT = BLACK_FONT
 
     def set_cell(row, col, value, blank_ok=False, colorize=False):
         """blank_ok=True for cells where None is a legitimate label placeholder
@@ -812,9 +845,6 @@ def render_fund_block(fund_rows, scheme_code):
     st.markdown("")
 
 
-if "theme" not in st.session_state:
-    st.session_state.theme = "light"
-
 current_user = render_auth_gate()
 inject_theme_css()
 
@@ -825,10 +855,14 @@ with top2:
     if st.button("Refresh data"):
         st.cache_data.clear()
 with top3:
-    theme_label = "Light mode" if st.session_state.theme == "dark" else "Dark mode"
-    if st.button(theme_label, key="theme_toggle"):
-        st.session_state.theme = "light" if st.session_state.theme == "dark" else "dark"
-        st.rerun()
+    st.markdown(
+        """<button id="theme-toggle-btn" onclick="
+            document.body.classList.toggle('dark-theme');
+            document.getElementById('theme-toggle-btn').textContent =
+                document.body.classList.contains('dark-theme') ? 'Light mode' : 'Dark mode';
+        ">Dark mode</button>""",
+        unsafe_allow_html=True,
+    )
 with top4:
     if st.button(f"Log out ({current_user['username']})", key="logout_btn"):
         destroy_session(st.query_params.get("t"))
