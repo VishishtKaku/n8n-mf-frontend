@@ -844,10 +844,14 @@ with top2:
 with top3:
     components.html(
         """
+        <style>
+        html, body { margin: 0; padding: 0; }
+        </style>
         <button id="theme-toggle-btn" style="
-            width: 100%; padding: 0.5rem 1rem; border-radius: 0.5rem;
-            border: 1px solid rgba(49, 51, 63, 0.2); background-color: #FFFFFF;
-            color: #31333F; font-size: 1rem; cursor: pointer; font-family: inherit;
+            width: 100%; box-sizing: border-box; padding: 0.375rem 1rem;
+            border-radius: 0.5rem; border: 1px solid rgba(49, 51, 63, 0.2);
+            background-color: #FFFFFF; color: #31333F; font-size: 1rem;
+            line-height: 1.6; cursor: pointer; font-family: inherit;
         ">Dark mode</button>
         <script>
         // components.html runs in its own iframe -- window.parent reaches the
@@ -865,7 +869,7 @@ with top3:
         });
         </script>
         """,
-        height=48,
+        height=39,
     )
 with top4:
     if st.button(f"Log out ({current_user['username']})", key="logout_btn"):
